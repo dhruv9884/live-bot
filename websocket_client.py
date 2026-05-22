@@ -1,5 +1,6 @@
 import upstox_client
 from datetime import datetime
+from urllib import parse, request
 import pandas as pd
 import numpy as np
 
@@ -16,6 +17,8 @@ from config import (
     option_ws_interval_seconds,
     option_target_points,
     option_stop_points,
+    telegram_bot_token,
+    telegram_chat_id,
 )
 from historical_buffer import result_df as historical_result_df
 from get_expiry import choose_option_contract_for_signal
@@ -36,6 +39,9 @@ PRINT_ROWS = print_rows
 OPTION_WS_INTERVAL_SECONDS = option_ws_interval_seconds
 OPTION_TARGET_POINTS = option_target_points
 OPTION_STOP_POINTS = option_stop_points
+TELEGRAM_BOT_TOKEN = telegram_bot_token
+TELEGRAM_CHAT_ID = telegram_chat_id
+TELEGRAM_ENABLED = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
 
 current_5m = {}
 has_buffer_columns = isinstance(historical_result_df, pd.DataFrame) and set(BUFFER_COLUMNS).issubset(
@@ -48,15 +54,61 @@ result_df = (
 )
 strategy_df = result_df.copy()
 last_reported_signal_index = -1
+
+
+def send_telegram_message(message: str) -> None:
+    if not TELEGRAM_ENABLED or not message:
+        return
+
+    try:
+        payload = parse.urlencode(
+            {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message,
+            }
+        ).encode("utf-8")
+        req = request.Request(
+            url=f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            data=payload,
+            method="POST",
+        )
+        req.add_header("Content-Type", "application/x-www-form-urlencoded")
+        with request.urlopen(req, timeout=15):
+            pass
+    except Exception as exc:
+        print(f"Telegram send failed: {exc}")
+
+
+def notify_trade_closed(trade: dict) -> None:
+    realized_pnl = float(trade.get("realized_pnl", 0.0))
+    realized_points = float(trade.get("realized_points", 0.0))
+    status = "PROFIT" if realized_pnl >= 0 else "LOSS"
+    message = (
+        "Trade Report\n"
+        f"Result: {status}\n"
+        f"Signal: {trade.get('signal')} at {trade.get('signal_time')}\n"
+        f"Symbol: {trade.get('trading_symbol')} | Qty: {trade.get('quantity')}\n"
+        f"Entry: {trade.get('entry_price')} ({trade.get('entry_time')})\n"
+        f"Exit: {trade.get('exit_price')} ({trade.get('exit_time')})\n"
+        f"Points: {realized_points:+.2f} | PnL: {realized_pnl:+.2f}\n"
+        f"Reason: {trade.get('exit_reason')}"
+    )
+    send_telegram_message(message)
+
+
 option_trade_manager = OptionTradeManager(
     access_token=ACCESS_TOKEN,
     interval_seconds=OPTION_WS_INTERVAL_SECONDS,
     target_points=OPTION_TARGET_POINTS,
     stop_points=OPTION_STOP_POINTS,
+    on_trade_closed=notify_trade_closed,
+    verbose_ws_logs=SHOW_WEBSOCKET_DATAFRAME,
 )
 
 
 def print_candle(instrument, candle):
+    if not SHOW_WEBSOCKET_DATAFRAME:
+        return
     start_time = datetime.fromtimestamp(candle["start"] / 1000)
     end_time = datetime.fromtimestamp(candle["end"] / 1000)
     print(
@@ -202,6 +254,12 @@ def append_to_buffer(candle):
     if latest_signal_idx > last_reported_signal_index:
         last_reported_signal_index = latest_signal_idx
         latest_signal = signal_rows.loc[latest_signal_idx]
+        send_telegram_message(
+            "Signal Generated\n"
+            f"Signal: {latest_signal.get('Signal')}\n"
+            f"Time: {latest_signal.get('timestamp')}\n"
+            f"Close: {latest_signal.get('close')} | SBT: {latest_signal.get('SBT')}"
+        )
         trigger_option_trade_from_signal(latest_signal)
         if SHOW_SIGNAL_DATA:
             print(
@@ -216,15 +274,25 @@ def trigger_option_trade_from_signal(signal_row: pd.Series) -> None:
     if signal_value not in {"LONG", "SHORT"}:
         return
 
+    signal_time = str(signal_row.get("timestamp"))
     if option_trade_manager.has_active_trade():
         print("Signal generated but option trade is already active. Skipping new entry.")
+        send_telegram_message(
+            "Trade Skipped\n"
+            f"From Signal: {signal_value} at {signal_time}\n"
+            "Reason: Active trade is already running."
+        )
         return
 
-    signal_time = str(signal_row.get("timestamp"))
     try:
         spot_price = float(signal_row.get("close"))
     except Exception:
         print("Signal generated but close price is invalid. Option trade skipped.")
+        send_telegram_message(
+            "Trade Skipped\n"
+            f"From Signal: {signal_value} at {signal_time}\n"
+            "Reason: Invalid close price for signal candle."
+        )
         return
 
     # Strategy currently runs on a single underlying from UPSTOX_INSTRUMENT.
@@ -239,6 +307,11 @@ def trigger_option_trade_from_signal(signal_row: pd.Series) -> None:
         )
     except Exception as exc:
         print(f"Failed to select option contract for signal {signal_value}: {exc}")
+        send_telegram_message(
+            "Trade Skipped\n"
+            f"From Signal: {signal_value} at {signal_time}\n"
+            f"Reason: Option contract selection failed ({exc})."
+        )
         return
 
     print(
@@ -247,7 +320,7 @@ def trigger_option_trade_from_signal(signal_row: pd.Series) -> None:
         f"strike={option_contract['strike_price']} | symbol={option_contract['trading_symbol']}"
     )
 
-    option_trade_manager.start_trade(
+    is_started = option_trade_manager.start_trade(
         option_instrument_key=option_contract["instrument_key"],
         trading_symbol=option_contract["trading_symbol"],
         quantity=int(option_contract["lot_size"]),
@@ -257,6 +330,14 @@ def trigger_option_trade_from_signal(signal_row: pd.Series) -> None:
         strike_price=float(option_contract["strike_price"]),
         expiry=str(option_contract["expiry"]),
     )
+    if is_started:
+        send_telegram_message(
+            "Trade Placed\n"
+            f"From Signal: {signal_value} at {signal_time}\n"
+            f"Option: {option_contract['trading_symbol']} ({option_contract['option_type']})\n"
+            f"Expiry: {option_contract['expiry']} | Strike: {option_contract['strike_price']}\n"
+            f"Qty: {int(option_contract['lot_size'])} | Spot: {spot_price}"
+        )
 
 
 def update_5m_candle(instrument, price, ts_ms):
@@ -332,6 +413,8 @@ def run_ws():
     def on_open():
         print("Connected to Upstox websocket")
         print(f"Starting buffer rows: {len(result_df)}")
+        if not TELEGRAM_ENABLED:
+            print("Telegram alerts disabled. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable.")
         strategy_df = super_bollinger_trend(result_df)
         historical_signals = get_signal_rows(strategy_df)
         if not historical_signals.empty:

@@ -39,10 +39,14 @@ mode = _get_str("UPSTOX_MODE", "full")
 strategy_period = _get_int("UPSTOX_STRATEGY_PERIOD", 20)
 strategy_mult = _get_float("UPSTOX_STRATEGY_MULT", 2.0)
 show_signal_data = _get_bool("UPSTOX_SHOW_SIGNAL_DATA", False)
-show_websocket_dataframe = _get_bool("UPSTOX_SHOW_WEBSOCKET_DATAFRAME", True)
+show_websocket_dataframe = _get_bool("UPSTOX_SHOW_WEBSOCKET_DATAFRAME", False)
 print_rows = _get_int("UPSTOX_PRINT_ROWS", 5)
 
 # Option trade tracking config
 option_ws_interval_seconds = _get_int("UPSTOX_OPTION_WS_INTERVAL_SECONDS", 10)
 option_target_points = _get_float("UPSTOX_OPTION_TARGET_POINTS", 10.0)
 option_stop_points = _get_float("UPSTOX_OPTION_STOP_POINTS", -6.0)
+
+# Telegram notifications
+telegram_bot_token = _get_str("TELEGRAM_BOT_TOKEN")
+telegram_chat_id = _get_str("TELEGRAM_CHAT_ID")

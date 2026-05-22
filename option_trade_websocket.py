@@ -1,6 +1,6 @@
 import threading
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 import upstox_client
 
 
@@ -12,12 +12,16 @@ class OptionTradeManager:
         target_points: float = 10.0,
         stop_points: float = -6.0,
         mode: str = "full",
+        on_trade_closed: Optional[Callable[[Dict[str, object]], None]] = None,
+        verbose_ws_logs: bool = False,
     ):
         self.access_token = access_token
         self.interval_ms = int(interval_seconds * 1000)
         self.target_points = float(target_points)
         self.stop_points = float(stop_points)
         self.mode = mode
+        self._on_trade_closed = on_trade_closed
+        self.verbose_ws_logs = bool(verbose_ws_logs)
 
         self._lock = threading.Lock()
         self._streamer = None
@@ -126,7 +130,7 @@ class OptionTradeManager:
             print("Option websocket closed:", code, reason)
             with self._lock:
                 candle = self._current_candle
-                if candle is not None:
+                if candle is not None and self.verbose_ws_logs:
                     self._print_candle(candle)
                 self._current_candle = None
                 self._streamer = None
@@ -171,7 +175,8 @@ class OptionTradeManager:
                 return
 
             if ts_ms >= candle["end"] and candle["end"] <= bucket_start:
-                self._print_candle(candle)
+                if self.verbose_ws_logs:
+                    self._print_candle(candle)
                 self._current_candle = {
                     "start": bucket_start,
                     "end": bucket_end,
@@ -188,6 +193,7 @@ class OptionTradeManager:
 
     def _register_trade_tick(self, ltp: float, ts_ms: int) -> None:
         close_reason = None
+        closed_trade = None
         with self._lock:
             trade = self._active_trade
             if trade is None or bool(trade.get("closed")):
@@ -209,10 +215,11 @@ class OptionTradeManager:
 
             points = float(trade["unrealized_points"])
             pnl = float(trade["unrealized_pnl"])
-            print(
-                f"Option tick | {trade['trading_symbol']} | ltp={trade['last_price']:.2f} "
-                f"| points={points:+.2f} | pnl={pnl:+.2f}"
-            )
+            if self.verbose_ws_logs:
+                print(
+                    f"Option tick | {trade['trading_symbol']} | ltp={trade['last_price']:.2f} "
+                    f"| points={points:+.2f} | pnl={pnl:+.2f}"
+                )
 
             if points >= self.target_points:
                 close_reason = "TARGET_HIT"
@@ -231,8 +238,15 @@ class OptionTradeManager:
                     f"| entry={trade['entry_price']:.2f} | exit={trade['exit_price']:.2f} "
                     f"| points={points:+.2f} | pnl={pnl:+.2f}"
                 )
+                closed_trade = dict(trade)
 
             streamer = self._streamer
+
+        if closed_trade is not None and self._on_trade_closed is not None:
+            try:
+                self._on_trade_closed(closed_trade)
+            except Exception as exc:
+                print(f"Trade close callback failed: {exc}")
 
         if close_reason is not None and streamer is not None:
             try:
