@@ -1,0 +1,55 @@
+name: Upstox Live Bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 09:15 AM IST, Monday-Friday
+    - cron: "45 3 * * 1-5"
+
+concurrency:
+  group: upstox-live-bot
+  cancel-in-progress: true
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      TZ: Asia/Kolkata
+      UPSTOX_APP_TOKEN: ${{ secrets.UPSTOX_APP_TOKEN }}
+      UPSTOX_ANALYTICS_TOKEN: ${{ secrets.UPSTOX_ANALYTICS_TOKEN }}
+      UPSTOX_INSTRUMENT: "NSE_INDEX|Nifty 50"
+      UPSTOX_TIME_FRAME: "5"
+      UPSTOX_HISTORICAL_BUFFER_DAYS: "4"
+      UPSTOX_MODE: "full"
+      UPSTOX_STRATEGY_PERIOD: "20"
+      UPSTOX_STRATEGY_MULT: "2.0"
+      UPSTOX_SHOW_SIGNAL_DATA: "false"
+      UPSTOX_SHOW_WEBSOCKET_DATAFRAME: "true"
+      UPSTOX_PRINT_ROWS: "5"
+      UPSTOX_OPTION_WS_INTERVAL_SECONDS: "10"
+      UPSTOX_OPTION_TARGET_POINTS: ${{ secrets.UPSTOX_OPTION_TARGET_POINTS }}
+      UPSTOX_OPTION_STOP_POINTS: ${{ secrets.UPSTOX_OPTION_STOP_POINTS }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install upstox-python-sdk pandas numpy
+
+      - name: Validate required secrets
+        run: |
+          if [ -z "$UPSTOX_APP_TOKEN" ] && [ -z "$UPSTOX_ANALYTICS_TOKEN" ]; then
+            echo "Either UPSTOX_APP_TOKEN or UPSTOX_ANALYTICS_TOKEN must be set."
+            exit 1
+          fi
+
+      - name: Run websocket bot
+        run: python websocket_client.py
